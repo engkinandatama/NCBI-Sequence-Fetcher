@@ -1,0 +1,4 @@
+requests==2.28.1
+pandas==1.5.3
+openpyxl==3.0.10
+tkinter==8.6 (Built-in)
