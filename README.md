@@ -49,7 +49,7 @@ Coming soon — stay tuned!
 ### 🔧 Step 1: Clone the repository
 
 ```bash
-https://github.com/engkinandatama/NCBI-Sequence-Fetcher.git
+git clone https://github.com/engkinandatama/NCBI-Sequence-Fetcher.git
 ```
 ```
 cd ncbi-data-scraper
