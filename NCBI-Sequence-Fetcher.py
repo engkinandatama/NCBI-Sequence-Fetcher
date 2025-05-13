@@ -8,9 +8,8 @@ import json
 import time
 import threading
 import pandas as pd
+from urllib.parse import parse_qs
 
-# Import untuk parsing query string
-from urllib.parse import parse_qs  # ⬅️ Perbaikan di sini
 
 class NCBISequenceFetcher:
     def __init__(self, root):
@@ -19,7 +18,7 @@ class NCBISequenceFetcher:
         self.root.geometry("900x700")
 
         # Variables
-        self.output_folder = tk.StringVar(value=os.path.expanduser("~"))
+        self.output_folder = tk.StringVar()
         self.ncbi_url = tk.StringVar()
         self.report_type = tk.StringVar(value="fasta")
         self.batch_mode = tk.BooleanVar(value=False)
@@ -28,8 +27,9 @@ class NCBISequenceFetcher:
 
         # Batch state management
         self.completed_urls = []
-        self.batch_state_file = os.path.join(self.output_folder.get(), "batch_state.json")
-        self.metadata_file = os.path.join(self.output_folder.get(), "ncbi_metadata.xlsx")
+        self.folder_cache_file = os.path.join(os.path.dirname(os.path.realpath(__file__)), "last_folder.json")
+        self.batch_state_file = "batch_state.json"
+        self.metadata_file = "ncbi_metadata.xlsx"
 
         # Metadata columns
         self.metadata_columns = [
@@ -39,11 +39,13 @@ class NCBISequenceFetcher:
         ]
         self.init_metadata()
 
+        # Load last folder
+        self.load_last_folder()
+
         # UI Setup
         self.setup_ui()
-        
+
     def init_metadata(self):
-        """Initialize or load metadata file"""
         if os.path.exists(self.metadata_file):
             try:
                 self.metadata_df = pd.read_excel(self.metadata_file)
@@ -111,6 +113,10 @@ class NCBISequenceFetcher:
         self.log_text = scrolledtext.ScrolledText(log_frame, wrap=tk.WORD)
         self.log_text.pack(fill=tk.BOTH, expand=True)
 
+        # Add tags for color
+        self.log_text.tag_config("success_tag", foreground="green")
+        self.log_text.tag_config("failure_tag", foreground="red")
+
         self.status_var = tk.StringVar(value="Ready")
         status_bar = ttk.Label(main_frame, textvariable=self.status_var, relief=tk.SUNKEN)
         status_bar.pack(fill=tk.X, padx=5, pady=5)
@@ -133,10 +139,33 @@ class NCBISequenceFetcher:
             self.url_entry.pack(fill=tk.X, expand=True)
             self.download_btn.config(text="Download")
 
+    def load_last_folder(self):
+        """Memuat direktori terakhir dari cache"""
+        default = os.path.expanduser("~")
+        if os.path.exists(self.folder_cache_file):
+            try:
+                with open(self.folder_cache_file, 'r') as f:
+                    data = json.load(f)
+                    self.output_folder.set(data.get("last_folder", default))
+            except:
+                self.output_folder.set(default)
+        else:
+            self.output_folder.set(default)
+
+    def save_last_folder(self, folder):
+        """Menyimpan direktori terakhir ke file"""
+        try:
+            with open(self.folder_cache_file, 'w') as f:
+                json.dump({"last_folder": folder}, f)
+        except Exception as e:
+            self.log(f"Error saving last folder: {str(e)}")
+
     def browse_folder(self):
-        folder = filedialog.askdirectory(initialdir=self.output_folder.get())
+        initial_dir = self.output_folder.get()
+        folder = filedialog.askdirectory(initialdir=initial_dir)
         if folder:
             self.output_folder.set(folder)
+            self.save_last_folder(folder)
             self.metadata_file = os.path.join(folder, "ncbi_metadata.xlsx")
             self.batch_state_file = os.path.join(folder, "batch_state.json")
             self.log("Output folder set to: " + folder)
@@ -168,9 +197,10 @@ class NCBISequenceFetcher:
                 f.write(self.batch_url_text.get(1.0, tk.END))
             self.log(f"URLs exported to: {filepath}")
 
-    def log(self, message):
+    def log(self, message, tag=None):
         timestamp = datetime.now().strftime("%H:%M:%S")
-        self.log_text.insert(tk.END, f"[{timestamp}] {message}\n")
+        full_message = f"[{timestamp}] {message}\n"
+        self.log_text.insert(tk.END, full_message, tag)
         self.log_text.see(tk.END)
         self.root.update_idletasks()
 
@@ -195,7 +225,7 @@ class NCBISequenceFetcher:
                 self.download_single()
         except Exception as e:
             self.root.after(0, messagebox.showerror, "Error", f"Operation failed: {str(e)}")
-            self.log(f"ERROR: {str(e)}")
+            self.log(f"ERROR: {str(e)}", tag="failure_tag")
         finally:
             self.running = False
             self.root.after(0, self.update_status, "Ready")
@@ -210,10 +240,10 @@ class NCBISequenceFetcher:
             self.log(f"STARTING: {url}")
             filename = self.process_url(url)
             duration = time.time() - start_time
-            self.log(f"COMPLETED in {duration:.2f}s: {filename}")
+            self.log(f"COMPLETED in {duration:.2f}s: {filename}", tag="success_tag")
             self.root.after(0, messagebox.showinfo, "Success", "Download completed!")
         except Exception as e:
-            self.log(f"FAILED: {str(e)}")
+            self.log(f"FAILED: {str(e)}", tag="failure_tag")
             raise
 
     def download_batch(self):
@@ -221,7 +251,6 @@ class NCBISequenceFetcher:
         if not all_urls:
             self.root.after(0, messagebox.showwarning, "Warning", "No valid URLs found!")
             return
-
         self.completed_urls = []
         total = len(all_urls)
         start_time = time.time()
@@ -235,19 +264,20 @@ class NCBISequenceFetcher:
                 try:
                     filename = self.process_url_with_retry(url)
                     self.completed_urls.append(url)
-                    self.log(f"COMPLETED: {url} -> {filename}")
+                    duration = time.time() - start_time
+                    self.log(f"COMPLETED in {duration:.2f}s: {filename}", tag="success_tag")
                 except Exception as e:
-                    self.log(f"FAILED: {url} - {str(e)}")
+                    self.log(f"FAILED: {url} - {str(e)}", tag="failure_tag")
                 self.update_progress(i, total)
                 self.save_batch_state(self.completed_urls, all_urls)
                 time.sleep(1)  # Rate limiting
         except Exception as e:
-            self.log(f"BATCH ERROR: {str(e)}")
+            self.log(f"BATCH ERROR: {str(e)}", tag="failure_tag")
             raise
         finally:
-            duration = time.time() - start_time
+            duration_total = time.time() - start_time
             success = len(self.completed_urls)
-            self.log(f"=== BATCH COMPLETED: {success}/{total} in {duration:.2f}s ===")
+            self.log(f"=== BATCH COMPLETED: {success}/{total} in {duration_total:.2f}s ===")
             if success == total:
                 self.clear_batch_state()
                 self.root.after(0, messagebox.showinfo, "Complete", f"Successfully processed {total} URLs")
@@ -263,7 +293,7 @@ class NCBISequenceFetcher:
                 if attempt == max_retries - 1:
                     raise
                 wait_time = 2 ** attempt
-                self.log(f"Retry {attempt+1} for {url} in {wait_time}s...")
+                self.log(f"Retry {attempt+1} for {url} in {wait_time}s...", tag="failure_tag")
                 time.sleep(wait_time)
 
     def get_urls_from_batch(self):
@@ -285,11 +315,10 @@ class NCBISequenceFetcher:
         return valid_urls
 
     def process_url(self, url):
-        """Process single URL into FASTA or GenBank format"""
-        # Parse accession ID from any kind of NCBI URL
+        # Parse accession ID dari semua jenis URL
         if '/nuccore/' in url:
-            accession_id = url.split('/nuccore/')[-1].split('?')[0].strip()
-        elif 'id=' in url:
+            accession_id = url.split('/nuccore/')[-1].split("?")[0].strip()
+        elif '?' in url and 'id=' in url:
             query_string = url.split('?', 1)[1]
             params = parse_qs(query_string)
             accession_id = params.get('id', [''])[0].strip()
@@ -305,18 +334,12 @@ class NCBISequenceFetcher:
         ext = self.report_type.get()
         api_url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nuccore&id= {accession_id}&rettype={ext}&retmode=text"
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+            'User-Agent': 'Mozilla/5.0',
             'Accept': 'text/plain'
         }
 
         response = requests.get(api_url, headers=headers, timeout=15)
         response.raise_for_status()
-
-        # Validate response format
-        if ext == "fasta" and not response.text.startswith('>'):
-            raise ValueError("Invalid FASTA format")
-        elif ext == "gb" and not response.text.startswith('LOCUS'):
-            raise ValueError("Invalid GenBank format")
 
         metadata = self.extract_metadata(accession_id)
         filename = self.save_data(response.text, metadata, ext)
@@ -343,8 +366,7 @@ class NCBISequenceFetcher:
             api_url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nuccore&id= {accession_id}&rettype=gb&retmode=text"
             response = requests.get(api_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
             response.raise_for_status()
-            gb_data = response.text
-            lines = gb_data.split('\n')
+            lines = response.text.split('\n')
 
             for line in lines:
                 if line.startswith('VERSION'):
@@ -375,7 +397,7 @@ class NCBISequenceFetcher:
         return metadata
 
     def extract_value(self, line, field_name):
-        patterns = [f'/{field_name}=\"', f'/{field_name}=']
+        patterns = [f'/{field_name}="', f'/{field_name}=']
         for pattern in patterns:
             start = line.find(pattern)
             if start != -1:
@@ -406,7 +428,6 @@ class NCBISequenceFetcher:
             filepath = os.path.join(self.output_folder.get(), filename)
             with open(filepath, 'w', encoding='utf-8') as f:
                 f.write(data)
-            self.log(f"Saved: {filename}")
             return filename
         except Exception as e:
             raise ValueError(f"Filename generation failed: {str(e)}")
@@ -450,6 +471,23 @@ class NCBISequenceFetcher:
                 os.remove(self.batch_state_file)
             except:
                 pass
+
+    def start_download(self):
+        if self.running:
+            return
+        try:
+            self.running = True
+            if self.batch_mode.get():
+                self.download_batch()
+            else:
+                self.download_single()
+        except Exception as e:
+            self.root.after(0, messagebox.showerror, "Error", f"Operation failed: {str(e)}")
+            self.log(f"ERROR: {str(e)}", tag="failure_tag")
+        finally:
+            self.running = False
+            self.root.after(0, self.update_status, "Ready")
+
 
 if __name__ == "__main__":
     root = tk.Tk()
