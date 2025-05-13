@@ -1,20 +1,22 @@
 import os
 import requests
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, ttk, scrolledtext
 import pandas as pd
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 class NCBIScraperApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("NCBI Data Scraper")
-        self.root.geometry("700x500")
+        self.root.title("NCBI Batch Downloader")
+        self.root.geometry("800x600")
         
         # Variables
         self.output_folder = tk.StringVar(value=os.path.expanduser("~"))
         self.ncbi_url = tk.StringVar()
-        self.report_type = tk.StringVar(value="fasta")  # Default to FASTA
+        self.report_type = tk.StringVar(value="fasta")
+        self.running = False  # Flag for batch processing
         
         # Metadata setup
         self.metadata_file = os.path.join(self.output_folder.get(), "ncbi_metadata.xlsx")
@@ -39,49 +41,91 @@ class NCBIScraperApp:
             self.metadata_df = pd.DataFrame(columns=self.metadata_columns)
     
     def setup_ui(self):
-        """Create the user interface"""
+        """Create the user interface with tabs"""
         main_frame = ttk.Frame(self.root, padding=10)
         main_frame.pack(fill=tk.BOTH, expand=True)
         
-        # URL Input
-        ttk.Label(main_frame, text="NCBI URL:").grid(row=0, column=0, sticky=tk.W)
-        self.url_entry = ttk.Entry(main_frame, textvariable=self.ncbi_url, width=60)
-        self.url_entry.grid(row=1, column=0, columnspan=2, pady=5, sticky=tk.EW)
+        # Tab System
+        tab_control = ttk.Notebook(main_frame)
         
-        # Bind focus in event to select all text
+        # Single Download Tab
+        single_tab = ttk.Frame(tab_control)
+        self.setup_single_tab(single_tab)
+        
+        # Batch Download Tab
+        batch_tab = ttk.Frame(tab_control)
+        self.setup_batch_tab(batch_tab)
+        
+        tab_control.add(single_tab, text="Single Download")
+        tab_control.add(batch_tab, text="Batch Download")
+        tab_control.pack(expand=1, fill="both")
+        
+        # Status Bar
+        self.status_var = tk.StringVar()
+        self.status_bar = ttk.Label(main_frame, textvariable=self.status_var, relief=tk.SUNKEN)
+        self.status_bar.pack(fill=tk.X, padx=5, pady=5)
+    
+    def setup_single_tab(self, parent):
+        """Setup single download tab"""
+        # URL Input
+        ttk.Label(parent, text="NCBI URL:").pack(anchor=tk.W, pady=(5,0))
+        self.url_entry = ttk.Entry(parent, textvariable=self.ncbi_url, width=80)
+        self.url_entry.pack(fill=tk.X, padx=5, pady=5)
         self.url_entry.bind('<FocusIn>', lambda e: self.url_entry.select_range(0, tk.END))
         
-        # Report Type - Changed to OptionMenu for non-editable dropdown
-        ttk.Label(main_frame, text="Format:").grid(row=2, column=0, sticky=tk.W)
-        report_menu = ttk.OptionMenu(main_frame, self.report_type, "fasta", "fasta", "genbank")
-        report_menu.grid(row=2, column=1, sticky=tk.W, padx=5)
+        # Format Selection
+        format_frame = ttk.Frame(parent)
+        format_frame.pack(fill=tk.X, padx=5, pady=5)
+        ttk.Label(format_frame, text="Format:").pack(side=tk.LEFT)
+        ttk.OptionMenu(format_frame, self.report_type, "fasta", "fasta", "genbank").pack(side=tk.LEFT, padx=5)
         
         # Output Folder
-        ttk.Label(main_frame, text="Save To:").grid(row=3, column=0, sticky=tk.W)
-        folder_frame = ttk.Frame(main_frame)
-        folder_frame.grid(row=4, column=0, columnspan=2, sticky=tk.EW)
-        
-        ttk.Entry(folder_frame, textvariable=self.output_folder).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(folder_frame, text="Browse", command=self.browse_folder).pack(side=tk.LEFT, padx=5)
+        folder_frame = ttk.Frame(parent)
+        folder_frame.pack(fill=tk.X, padx=5, pady=5)
+        ttk.Label(folder_frame, text="Save To:").pack(side=tk.LEFT)
+        ttk.Entry(folder_frame, textvariable=self.output_folder).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        ttk.Button(folder_frame, text="Browse", command=self.browse_folder).pack(side=tk.LEFT)
         
         # Download Button
-        ttk.Button(main_frame, text="Download", command=self.download_data).grid(row=5, column=0, pady=10)
+        ttk.Button(parent, text="Download", command=self.download_single).pack(pady=10)
         
         # Log Area
-        self.log_text = tk.Text(main_frame, height=12, wrap=tk.WORD)
-        self.log_text.grid(row=6, column=0, columnspan=2, sticky=tk.NSEW)
-        
-        # Scrollbar
-        scrollbar = ttk.Scrollbar(main_frame, orient=tk.VERTICAL, command=self.log_text.yview)
-        scrollbar.grid(row=6, column=2, sticky=tk.NS)
+        log_frame = ttk.Frame(parent)
+        log_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.log_text = tk.Text(log_frame, height=10, wrap=tk.WORD)
+        scrollbar = ttk.Scrollbar(log_frame, orient=tk.VERTICAL, command=self.log_text.yview)
         self.log_text.config(yscrollcommand=scrollbar.set)
+        self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+    
+    def setup_batch_tab(self, parent):
+        """Setup batch download tab"""
+        # URL Input Area
+        ttk.Label(parent, text="Enter NCBI URLs (one per line):").pack(anchor=tk.W, pady=(5,0))
+        self.batch_url_text = scrolledtext.ScrolledText(parent, height=12, wrap=tk.WORD)
+        self.batch_url_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        # Configure grid weights
-        main_frame.columnconfigure(0, weight=1)
-        main_frame.rowconfigure(6, weight=1)
+        # Control Buttons
+        control_frame = ttk.Frame(parent)
+        control_frame.pack(fill=tk.X, padx=5, pady=5)
         
-        # Bind Enter key
-        self.root.bind('<Return>', lambda e: self.download_data())
+        ttk.Button(control_frame, text="Import from File", 
+                  command=self.import_urls_from_file).pack(side=tk.LEFT, padx=2)
+        ttk.Button(control_frame, text="Clear List",
+                  command=self.clear_batch_urls).pack(side=tk.LEFT, padx=2)
+        ttk.Button(control_frame, text="Download All", 
+                  command=self.download_batch).pack(side=tk.RIGHT, padx=2)
+        
+        # Progress Bar
+        self.progress_var = tk.DoubleVar()
+        self.progress_bar = ttk.Progressbar(parent, orient="horizontal", 
+                                          length=200, mode="determinate",
+                                          variable=self.progress_var)
+        self.progress_bar.pack(fill=tk.X, padx=5, pady=5)
+        
+        # Batch Log
+        self.batch_log = scrolledtext.ScrolledText(parent, height=8, wrap=tk.WORD)
+        self.batch_log.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
     
     def browse_folder(self):
         """Select output directory"""
@@ -89,74 +133,137 @@ class NCBIScraperApp:
         if folder:
             self.output_folder.set(folder)
             self.metadata_file = os.path.join(folder, "ncbi_metadata.xlsx")
-            self.log(f"Output folder set to: {folder}")
+            self.log("Output folder set to: " + folder)
     
-    def log(self, message):
+    def log(self, message, batch=False):
         """Add message to log"""
-        self.log_text.insert(tk.END, message + "\n")
-        self.log_text.see(tk.END)
+        if batch:
+            self.batch_log.insert(tk.END, message + "\n")
+            self.batch_log.see(tk.END)
+        else:
+            self.log_text.insert(tk.END, message + "\n")
+            self.log_text.see(tk.END)
         self.root.update_idletasks()
     
-    def download_data(self):
-        """Main download function"""
+    def update_status(self, message):
+        """Update status bar"""
+        self.status_var.set(message)
+        self.root.update_idletasks()
+    
+    def download_single(self):
+        """Handle single download"""
+        if self.running:
+            return
+            
         url = self.ncbi_url.get().strip()
         if not url:
-            messagebox.showerror("Error", "Please enter a valid NCBI URL")
+            messagebox.showwarning("Warning", "Please enter a valid NCBI URL")
             return
         
         try:
-            # Validate URL
-            if not url.startswith(("https://www.ncbi.nlm.nih.gov/", "http://www.ncbi.nlm.nih.gov/")):
-                messagebox.showerror("Error", "URL must be from NCBI (e.g. https://www.ncbi.nlm.nih.gov/nuccore/JN188370.1)")
-                return
-            
-            # Extract accession ID
-            accession_id = url.split("/")[-1].split("?")[0]
-            if not accession_id:
-                raise ValueError("Could not extract accession ID from URL")
-            
-            # Generate API URL based on report type
-            if self.report_type.get() == "fasta":
-                api_url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nuccore&id={accession_id}&rettype=fasta&retmode=text"
-            else:  # genbank
-                api_url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nuccore&id={accession_id}&rettype=gb&retmode=text"
-            
-            self.log(f"Fetching data from NCBI API...")
-            
-            # Set headers to mimic browser
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                'Accept': 'text/plain',
-            }
-            
-            # Download data
-            response = requests.get(api_url, headers=headers, timeout=10)
-            response.raise_for_status()
-            
-            # Validate response
-            if self.report_type.get() == "fasta" and not response.text.startswith('>'):
-                raise ValueError("Invalid FASTA format received from NCBI")
-            elif self.report_type.get() == "genbank" and not response.text.startswith('LOCUS'):
-                raise ValueError("Invalid GenBank format received from NCBI")
-            
-            # Extract metadata from GenBank format (even if we're downloading FASTA)
-            metadata = self.extract_metadata(accession_id)
-            
-            # Save data with proper filename based on metadata
-            filename = self.save_data(response.text, metadata)
-            
-            # Save metadata
-            self.save_metadata(metadata, filename)
-            
-            messagebox.showinfo("Success", "Data downloaded successfully!")
-            
+            self.running = True
+            self.process_url(url)
         except Exception as e:
             self.log(f"Error: {str(e)}")
             messagebox.showerror("Error", f"Download failed: {str(e)}")
+        finally:
+            self.running = False
+    
+    def download_batch(self):
+        """Handle batch download"""
+        if self.running:
+            return
+            
+        urls = self.get_urls_from_text()
+        if not urls:
+            messagebox.showwarning("Warning", "No URLs entered!")
+            return
+        
+        self.running = True
+        self.batch_log.delete(1.0, tk.END)
+        self.progress_var.set(0)
+        self.progress_bar["maximum"] = len(urls)
+        
+        # Use thread pool for concurrent downloads
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = {executor.submit(self.process_url, url): url for url in urls}
+            
+            for i, future in enumerate(as_completed(futures), 1):
+                url = futures[future]
+                try:
+                    result = future.result()
+                    self.log(f"Completed: {url}", batch=True)
+                except Exception as e:
+                    self.log(f"Error processing {url}: {str(e)}", batch=True)
+                
+                self.progress_var.set(i)
+                self.update_status(f"Processing {i}/{len(urls)}")
+                self.root.update()
+        
+        self.running = False
+        messagebox.showinfo("Complete", f"Finished processing {len(urls)} URLs")
+    
+    def get_urls_from_text(self):
+        """Extract URLs from text widget"""
+        text = self.batch_url_text.get(1.0, tk.END).strip()
+        return [url.strip() for url in text.split('\n') if url.strip()]
+    
+    def import_urls_from_file(self):
+        """Import URLs from text file"""
+        filepath = filedialog.askopenfilename(filetypes=[("Text files", "*.txt")])
+        if filepath:
+            with open(filepath, 'r') as f:
+                self.batch_url_text.insert(tk.END, f.read())
+    
+    def clear_batch_urls(self):
+        """Clear the URL list"""
+        self.batch_url_text.delete(1.0, tk.END)
+    
+    def process_url(self, url):
+        """Process a single URL (download + save)"""
+        self.log(f"\nProcessing: {url}")
+        
+        # Validate URL
+        if not url.startswith(("https://www.ncbi.nlm.nih.gov/", "http://www.ncbi.nlm.nih.gov/")):
+            raise ValueError("Invalid NCBI URL format")
+        
+        # Extract accession ID
+        accession_id = url.split("/")[-1].split("?")[0]
+        if not accession_id:
+            raise ValueError("Could not extract accession ID from URL")
+        
+        # Generate API URL
+        if self.report_type.get() == "fasta":
+            api_url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nuccore&id={accession_id}&rettype=fasta&retmode=text"
+        else:  # genbank
+            api_url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nuccore&id={accession_id}&rettype=gb&retmode=text"
+        
+        # Download data
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'text/plain',
+        }
+        
+        response = requests.get(api_url, headers=headers, timeout=15)
+        response.raise_for_status()
+        
+        # Validate response
+        if self.report_type.get() == "fasta" and not response.text.startswith('>'):
+            raise ValueError("Invalid FASTA format received")
+        elif self.report_type.get() == "genbank" and not response.text.startswith('LOCUS'):
+            raise ValueError("Invalid GenBank format received")
+        
+        # Extract metadata
+        metadata = self.extract_metadata(accession_id)
+        
+        # Save files
+        filename = self.save_data(response.text, metadata)
+        self.save_metadata(metadata, filename)
+        
+        return filename
     
     def extract_metadata(self, accession_id):
-        """Extract metadata from GenBank format with improved taxonomy and country handling"""
-        # Initialize metadata with default values
+        """Extract metadata from GenBank format"""
         metadata = {
             'Accession': accession_id,
             'Version': 'NA',
@@ -182,157 +289,120 @@ class NCBIScraperApp:
             response.raise_for_status()
             gb_data = response.text
 
-            # Parse GenBank data line by line
+            # Parse GenBank data
             lines = gb_data.split('\n')
             for i, line in enumerate(lines):
                 try:
                     if line.startswith('VERSION'):
-                        metadata['Version'] = line.split()[1].strip() if len(line.split()) > 1 else 'NA'
+                        metadata['Version'] = line.split()[1].strip()
                     elif line.startswith('DEFINITION'):
-                        metadata['Definition'] = line[12:].strip() if len(line) > 12 else 'NA'
+                        metadata['Definition'] = line[12:].strip()
                     elif line.startswith('  ORGANISM'):
-                        # Extract organism name
-                        metadata['Organism'] = line[12:].strip() if len(line) > 12 else 'NA'
-                        
-                        # Extract full taxonomy from subsequent lines
+                        metadata['Organism'] = line[12:].strip()
+                        # Extract taxonomy
                         taxonomy_lines = []
                         j = i + 1
-                        while j < len(lines) and lines[j].startswith(' ' * 10):  # Taxonomy lines are indented
+                        while j < len(lines) and lines[j].startswith(' ' * 10):
                             taxonomy_lines.append(lines[j].strip())
                             j += 1
-                        
                         if taxonomy_lines:
-                            # Join taxonomy lines and clean up
-                            full_taxonomy = '; '.join(taxonomy_lines)
-                            # Remove any trailing semicolons or spaces
-                            metadata['Taxonomy'] = full_taxonomy.strip('; ')
-
+                            metadata['Taxonomy'] = '; '.join(taxonomy_lines).strip('; ')
                     elif '/strain=' in line:
-                        metadata['Strain'] = self.extract_quoted_value(line, 'strain')
+                        metadata['Strain'] = self.extract_value(line, 'strain')
                     elif '/country=' in line or '/geo_loc_name=' in line:
-                        # Check both possible field names for country
                         if '/country=' in line:
-                            metadata['Country'] = self.extract_quoted_value(line, 'country')
-                        elif '/geo_loc_name=' in line:
-                            metadata['Country'] = self.extract_quoted_value(line, 'geo_loc_name')
+                            metadata['Country'] = self.extract_value(line, 'country')
+                        else:
+                            metadata['Country'] = self.extract_value(line, 'geo_loc_name')
                     elif '/collection_date=' in line:
-                        metadata['Collection_Date'] = self.extract_quoted_value(line, 'collection_date')
+                        metadata['Collection_Date'] = self.extract_value(line, 'collection_date')
                     elif '/collected_by=' in line:
-                        metadata['Collected_By'] = self.extract_quoted_value(line, 'collected_by')
+                        metadata['Collected_By'] = self.extract_value(line, 'collected_by')
                     elif '/isolation_source=' in line:
-                        metadata['Isolation_Source'] = self.extract_quoted_value(line, 'isolation_source')
+                        metadata['Isolation_Source'] = self.extract_value(line, 'isolation_source')
                     elif '/product=' in line:
-                        metadata['Product'] = self.extract_quoted_value(line, 'product')
+                        metadata['Product'] = self.extract_value(line, 'product')
                     elif line.startswith('LOCUS'):
                         parts = line.split()
                         if len(parts) >= 3:
                             metadata['Length'] = parts[2] + 'bp'
-                except Exception as field_error:
-                    self.log(f"Warning: Error parsing line '{line}': {str(field_error)}")
+                except Exception as e:
                     continue
 
-        except requests.exceptions.RequestException as e:
-            self.log(f"Warning: Failed to fetch GenBank data for metadata: {str(e)}")
         except Exception as e:
-            self.log(f"Warning: Unexpected error during metadata extraction: {str(e)}")
+            self.log(f"Metadata extraction warning: {str(e)}")
 
         return metadata
 
-    def extract_quoted_value(self, line, field_name):
-        """Helper method to safely extract quoted values from GenBank lines"""
-        try:
-            # Find the field pattern (supports both quoted and unquoted values)
-            pattern1 = f'/{field_name}="'
-            pattern2 = f'/{field_name}='
-            
-            start_idx = line.find(pattern1)
-            if start_idx != -1:
-                # Quoted value
-                start_idx += len(pattern1)
-                end_idx = line.find('"', start_idx)
-                if end_idx == -1:
-                    return 'NA'
-                return line[start_idx:end_idx].strip()
-            else:
-                # Unquoted value
-                start_idx = line.find(pattern2)
-                if start_idx == -1:
-                    return 'NA'
-                start_idx += len(pattern2)
-                end_idx = len(line)
-                # Find end of value (either space or end of line)
-                space_idx = line.find(' ', start_idx)
-                if space_idx != -1 and space_idx > start_idx:
-                    end_idx = space_idx
-                semicolon_idx = line.find(';', start_idx)
-                if semicolon_idx != -1 and semicolon_idx > start_idx:
-                    end_idx = min(end_idx, semicolon_idx)
-                return line[start_idx:end_idx].strip()
-        except:
-            return 'NA'
+    def extract_value(self, line, field_name):
+        """Extract value from GenBank line"""
+        patterns = [f'/{field_name}="', f'/{field_name}=']
+        for pattern in patterns:
+            start = line.find(pattern)
+            if start != -1:
+                start += len(pattern)
+                end = line.find('"', start) if '"' in pattern else min(
+                    line.find(' ', start),
+                    line.find('\n', start),
+                    line.find(';', start),
+                    len(line)
+                )
+                if end == -1:
+                    end = len(line)
+                return line[start:end].strip()
+        return 'NA'
     
     def save_data(self, data, metadata):
-        """Save the downloaded data to file with proper naming"""
-        # Determine file extension
+        """Save sequence data to file"""
         ext = ".fasta" if self.report_type.get() == "fasta" else ".gb"
         
-        # Generate filename based on metadata
-        organism = metadata.get('Organism', 'unknown_organism').replace(' ', '_')
-        strain = metadata.get('Strain', 'unknown_strain').replace(' ', '_')
-        accession = metadata.get('Accession', 'no_accession')
-        length = metadata.get('Length', 'unknown_length')
-        product = metadata.get('Product', 'unknown_product')
-        definition = metadata.get('Definition', '')
+        # Generate filename components
+        components = [
+            metadata.get('Organism', 'unknown').replace(' ', '_'),
+            metadata.get('Strain', 'unknown'),
+            metadata.get('Accession', ''),
+            metadata.get('Length', ''),
+            metadata.get('Product', '')
+        ]
         
-        # Extract description from DEFINITION (e.g., "partial cds")
-        description = ''
-        if definition:
-            # Look for common patterns in definition
-            if 'partial' in definition.lower():
-                description = 'partial'
-            elif 'complete' in definition.lower():
-                description = 'complete'
-            if 'cds' in definition.lower():
-                description += '_cds' if description else 'cds'
-            elif 'gene' in definition.lower():
-                description += '_gene' if description else 'gene'
-            elif 'genome' in definition.lower():
-                description += '_genome' if description else 'genome'
+        # Add description from definition
+        definition = metadata.get('Definition', '').lower()
+        desc = []
+        if 'partial' in definition:
+            desc.append('partial')
+        if 'complete' in definition:
+            desc.append('complete')
+        if 'cds' in definition:
+            desc.append('cds')
+        elif 'gene' in definition:
+            desc.append('gene')
+        elif 'genome' in definition:
+            desc.append('genome')
         
-        # Construct filename
-        filename_parts = []
-        if organism: filename_parts.append(organism)
-        if strain: filename_parts.append(strain)
-        if accession: filename_parts.append(accession)
-        if length: filename_parts.append(length)
-        if product: filename_parts.append(product)
-        if description: filename_parts.append(description)
+        if desc:
+            components.append('_'.join(desc))
         
-        filename = '_'.join(filename_parts) + ext
-        
-        # Clean filename
-        filename = "".join(c for c in filename if c.isalnum() or c in ('_', '-', '.'))
-        filepath = os.path.join(self.output_folder.get(), filename)
+        # Filter and join components
+        filename = '_'.join(filter(None, components)) + ext
+        filename = "".join(c if c.isalnum() or c in ('_', '-', '.') else '_' for c in filename)
         
         # Save file
+        filepath = os.path.join(self.output_folder.get(), filename)
         with open(filepath, 'w', encoding='utf-8') as f:
             f.write(data)
         
-        self.log(f"File saved as: {filepath}")
+        self.log(f"Saved: {filename}")
         return filename
     
     def save_metadata(self, metadata, filename):
-        """Save metadata to Excel file"""
+        """Update metadata Excel file"""
         try:
             metadata['Filename'] = filename
-            
-            # Add to DataFrame and save
-            self.metadata_df = pd.concat([self.metadata_df, pd.DataFrame([metadata])], ignore_index=True)
+            new_row = pd.DataFrame([metadata])
+            self.metadata_df = pd.concat([self.metadata_df, new_row], ignore_index=True)
             self.metadata_df.to_excel(self.metadata_file, index=False)
-            self.log("Metadata saved successfully")
-            
         except Exception as e:
-            self.log(f"Warning: Metadata save failed - {str(e)}")
+            self.log(f"Metadata save error: {str(e)}")
 
 if __name__ == "__main__":
     root = tk.Tk()
